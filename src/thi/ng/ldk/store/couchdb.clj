@@ -7,6 +7,8 @@
 (def ^:const VERSION "0.1.0-SNAPSHOT")
 (def ^:const DDOC-ID (str "delta-" VERSION))
 
+(def ^:dynamic *hashimpl* (comp str hash api/index-value))
+
 (def ^:private view-template
   "function(doc) {
   for(var p in doc.po) {
@@ -14,13 +16,10 @@
     for(var o in obj) {
       var o = obj[o], val;
       if (typeof o == 'object') {
-        val = o.literal;
-        if (o.lang != undefined) {
-          val += '@' + o.lang;
-        } else if (o.xsd != undefined) {
-          val += '^^<' + o.xsd + '>';
-        }
-      } else val = o;
+        val = o.hash || o.blank;
+      } else {
+        val = o;
+      }
       emit([%s, %s, %s], o);
     }
   }
@@ -33,33 +32,49 @@
   (let [[a b c] (name id)]
     {id {:map (format view-template (view-vars a) (view-vars b) (view-vars c))}}))
 
-(defn- map->literal
-  [m] (api/make-literal (:literal m) (:lang m) (:xsd m)))
+(defn- map->node
+  "Converts a couchdb map into a NodeLiteral or NodeBlank"
+  [m]
+  (if (:hash m)
+    (api/make-literal (:literal m) (:lang m) (:xsd m))
+    (api/make-blank-node (:blank m))))
 
 (defn- literal->map
-  [l]
+  "Converts a NodeLiteral into a couchdb map (incl. hashed value)"
+  [hashfn l]
   {:literal (api/label l)
+   :hash (hashfn l)
    :lang (api/language l)
    :xsd (api/datatype l)})
 
+(defn- blank->map
+  "Converts a NodeBlank into a couchdb map"
+  [b]
+  {:blank (api/label b)})
+
 (defn- object-value
-  [o] (if (map? o) (api/index-value (map->literal o)) o))
+  "If o is a PNode returns hashed literal value or label. If o is a
+  couchdb literal returns o's hash or else o itself."
+  [hashfn o]
+  (if (satisfies? api/PNode o)
+    (if (api/literal? o) (hashfn o) (api/label o))
+    (if (map? o) (or (:hash o) (:blank o)) o)))
 
 (defn- indexed-po?
-  [doc p o]
-  (when-let [obj (get-in doc [:po (keyword (api/index-value p))])]
-    (let [oi (api/index-value o)]
-      (some #(= oi %) (map object-value obj)))))
+  [doc hashfn p o]
+  (when-let [obj (get-in doc [:po p])]
+    (let [oi (object-value hashfn o)]
+      (some #(= oi %) (map #(object-value hashfn %) obj)))))
 
 (defn- unindex-po
-  [doc p o]
-  (let [p (keyword (api/index-value p))]
+  [doc hashfn p o]
+  (let [p (keyword (api/label p))]
     (if-let [obj (get-in doc [:po p])]
-      (let [oi (api/index-value o)
+      (let [oi (object-value hashfn o)
             po (reduce
                 (fn [po o]
-                  (prn :oi oi :ov (object-value o) :o o)
-                  (if-not (= oi (object-value o))
+                  ;;(prn :oi oi :ov (object-value hashfn o) :o o)
+                  (if-not (= oi (object-value hashfn o))
                     (conj po o)
                     po))
                 [] obj)]
@@ -69,18 +84,20 @@
       [doc false])))
 
 (defrecord CouchDBStore
-    [url]
+    [url hashfn]
   api/PModel
   (add-statement
     [this [s p o]]
     (let [s (api/label s)
+          p (keyword (api/label p))
           doc (or (db/get-document url s) {:_id s :po {}})]
-      (when-not (indexed-po? doc p o)
+      (when-not (indexed-po? doc hashfn p o)
         (let [doc (update-in
-                   doc [:po (api/label p)] vec-conj
-                   (if (api/literal? o)
-                     (literal->map o)
-                     (api/label o)))]
+                   doc [:po p] vec-conj
+                   (cond
+                    (api/literal? o) (literal->map hashfn o)
+                    (api/blank? o) (blank->map o)
+                    :default (api/label o)))]
           (db/put-document url doc)))
       this))
   (add-many [this statements]
@@ -88,7 +105,7 @@
   (remove-statement
     [this [s p o]]
     (when-let [doc (db/get-document url (api/label s))]
-      (let [[doc edit?] (unindex-po doc p o)]
+      (let [[doc edit?] (unindex-po doc hashfn p o)]
         (when edit?
           (if (seq (:po doc))
             (db/put-document url doc)
@@ -96,7 +113,9 @@
     this)
   (select
     [this s p o]
-    (let [[s p o] (map api/index-value [s p o])
+    (let [s (api/index-value s)
+          p (api/index-value p)
+          o (object-value hashfn o)
           [view s e si pi] (cond
                             (and s p o) ["spo" [s p o] [s p (str o " ")] 0 1]
                             (and s p) ["spo" [s p] [s (str p " ")] 0 1]
@@ -112,17 +131,18 @@
                   [(api/make-resource (key si))
                    (api/make-resource (key pi))
                    (if (map? value)
-                     (map->literal value)
+                     (map->node value)
                      (api/make-resource value))]))))))
 
 (defn make-store
-  [url]
-  (let [db (CouchDBStore. url)
-        ddocid (str "_design/" DDOC-ID)
-        ddoc (db/get-document url ddocid)]
-    (when-not ddoc
-      (let [ddoc {:_id ddocid
-                  :language "javascript"
-                  :views (apply merge (map make-view [:spo :sop :ops :pos]))}]
-        (db/put-document url ddoc)))
-    db))
+  ([url] (make-store url *hashimpl*))
+  ([url hashfn]
+     (let [db (CouchDBStore. url hashfn)
+           ddocid (str "_design/" DDOC-ID)
+           ddoc (db/get-document url ddocid)]
+       (when-not ddoc
+         (db/put-document
+          url {:_id ddocid
+               :language "javascript"
+               :views (apply merge (map make-view [:spo :sop :ops :pos]))}))
+       db)))
