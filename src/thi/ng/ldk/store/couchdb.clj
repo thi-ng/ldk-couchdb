@@ -83,25 +83,48 @@
           [(update-in doc [:po] dissoc p) true]))
       [doc false])))
 
+(defn add-statement*
+  [doc hashfn p o]
+  (let [p (keyword (api/label p))]
+    (if-not (indexed-po? doc hashfn p o)
+      [(update-in
+        doc [:po p] vec-conj
+        (cond
+         (api/literal? o) (literal->map hashfn o)
+         (api/blank? o) (blank->map o)
+         :default (api/label o))) true]
+      [doc false])))
+
 (defrecord CouchDBStore
     [url hashfn]
   api/PModel
   (add-statement
     [this [s p o]]
     (let [s (api/label s)
-          p (keyword (api/label p))
-          doc (or (db/get-document url s) {:_id s :po {}})]
-      (when-not (indexed-po? doc hashfn p o)
-        (let [doc (update-in
-                   doc [:po p] vec-conj
-                   (cond
-                    (api/literal? o) (literal->map hashfn o)
-                    (api/blank? o) (blank->map o)
-                    :default (api/label o)))]
-          (db/put-document url doc)))
+          doc (or (db/get-document url s) {:_id s :po {}})
+          [doc edit?] (add-statement* doc hashfn p o)]
+      (when edit? (db/put-document url doc))
       this))
   (add-many [this statements]
-    (reduce api/add-statement this statements))
+    (doseq [chunk (partition-all 1000 statements)]
+      (let [subjects (map (comp api/label first) chunk)
+            docs (reduce
+                  (fn [idx s]
+                    (if-not (idx s)
+                      (assoc idx s (or (db/get-document url s) {:_id s :po {}}))
+                      idx))
+                  {} subjects)
+            [docs edits] (reduce
+                          (fn [[idx edits :as state] [s p o]]
+                            (let [s (api/label s)
+                                  [doc edit?] (add-statement* (idx s) hashfn p o)]
+                              (if edit?
+                                [(assoc idx s doc) (conj edits s)]
+                                state)))
+                          [docs #{}] chunk)]
+        (when (seq edits)
+          (db/bulk-update url (vals (select-keys docs edits))))))
+    this)
   (remove-statement
     [this [s p o]]
     (when-let [doc (db/get-document url (api/label s))]
