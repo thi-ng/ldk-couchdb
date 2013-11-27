@@ -2,12 +2,13 @@
   (:require
    [thi.ng.ldk.core.api :as api]
    [thi.ng.common.data.core :refer [vec-conj]]
+   [byte-transforms :as bt]
    [com.ashafa.clutch :as db]))
 
 (def ^:const VERSION "0.1.0-SNAPSHOT")
 (def ^:const DDOC-ID (str "delta-" VERSION))
 
-(def ^:dynamic *hashimpl* (comp str hash api/index-value))
+(def ^:dynamic *hashimpl* (comp str #(bt/hash % :murmur64) api/index-value))
 
 (def ^:private view-template
   "function(doc) {
