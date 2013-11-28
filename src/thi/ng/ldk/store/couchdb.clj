@@ -2,22 +2,25 @@
   (:require
    [thi.ng.ldk.core.api :as api]
    [thi.ng.common.data.core :refer [vec-conj]]
-   [byte-transforms :as bt]
-   [com.ashafa.clutch :as db]))
+   [com.ashafa.clutch :as db])
+  (:import
+   [com.google.common.hash Hashing]))
 
 (def ^:const VERSION "0.1.0-SNAPSHOT")
 (def ^:const DDOC-ID (str "delta-" VERSION))
 
-(def ^:dynamic *hashimpl* (comp str #(bt/hash % :murmur64) api/index-value))
+(def ^:dynamic *hashimpl*
+  (let [murmur (Hashing/murmur3_128)]
+    #(->> % api/index-value (.hashString murmur) (.asLong) (.toString))))
 
-(def ^:private view-template
+(def ^:private spo-template
   "function(doc) {
-  for(var p in doc.po) {
+  for (var p in doc.po) {
     var obj = doc.po[p];
-    for(var o in obj) {
+    for (var o in obj) {
       var o = obj[o], val;
       if (typeof o == 'object') {
-        val = o.hash || o.blank;
+        val = o.h || o.id;
       } else {
         val = o;
       }
@@ -26,32 +29,48 @@
   }
 }")
 
-(def  ^:private view-vars {\s "doc._id" \p "p" \o "val"})
+(def ^:private view-subjects
+  "function(doc) { emit(doc._id, 1); }")
+
+(def ^:private view-preds
+  "function(doc) { for (var p in doc.po) emit(p, 1); }")
+
+(def ^:private view-objects
+  "function(doc) {
+  for(var p in doc.po) {
+    var obj = doc.po[p];
+    for(var o in obj) {
+      emit(obj[o], 1);
+    }
+  }
+}")
+
+(def ^:private view-vars {\s "doc._id" \p "p" \o "val"})
 
 (defn- make-view
   [id]
   (let [[a b c] (name id)]
-    {id {:map (format view-template (view-vars a) (view-vars b) (view-vars c))}}))
+    {id {:map (format spo-template (view-vars a) (view-vars b) (view-vars c))}}))
 
 (defn- map->node
   "Converts a couchdb map into a NodeLiteral or NodeBlank"
   [m]
-  (if (:hash m)
-    (api/make-literal (:literal m) (:lang m) (:xsd m))
-    (api/make-blank-node (:blank m))))
+  (if (:h m)
+    (api/make-literal (:v m) (:l m) (:t m))
+    (api/make-blank-node (:id m))))
 
 (defn- literal->map
   "Converts a NodeLiteral into a couchdb map (incl. hashed value)"
   [hashfn l]
-  {:literal (api/label l)
-   :hash (hashfn l)
-   :lang (api/language l)
-   :xsd (api/datatype l)})
+  {:v (api/label l)
+   :h (hashfn l)
+   :l (api/language l)
+   :t (api/datatype l)})
 
 (defn- blank->map
   "Converts a NodeBlank into a couchdb map"
   [b]
-  {:blank (api/label b)})
+  {:id (api/label b)})
 
 (defn- object-value
   "If o is a PNode returns hashed literal value or label. If o is a
@@ -59,7 +78,7 @@
   [hashfn o]
   (if (satisfies? api/PNode o)
     (if (api/literal? o) (hashfn o) (api/label o))
-    (if (map? o) (or (:hash o) (:blank o)) o)))
+    (if (map? o) (or (:h o) (:id o)) o)))
 
 (defn- indexed-po?
   [doc hashfn p o]
@@ -84,7 +103,7 @@
           [(update-in doc [:po] dissoc p) true]))
       [doc false])))
 
-(defn add-statement*
+(defn- add-statement*
   [doc hashfn p o]
   (let [p (keyword (api/label p))]
     (if-not (indexed-po? doc hashfn p o)
@@ -95,6 +114,11 @@
          (api/blank? o) (blank->map o)
          :default (api/label o))) true]
       [doc false])))
+
+(defn- entity-view
+  [url view fn]
+  (->> (db/get-view url DDOC-ID view {:group true})
+       (map fn)))
 
 (defrecord CouchDBStore
     [url hashfn]
@@ -135,6 +159,21 @@
             (db/put-document url doc)
             (db/delete-document url doc)))))
     this)
+  (subjects
+    [this] (entity-view url "subjects" :key))
+  (predicates
+    [this] (entity-view url "preds" :key))
+  (objects
+    [this]
+    (entity-view
+     url "objects"
+     (fn [{o :key}] (if (map? o) (map->node o) (api/make-resource o)))))
+  (subject?
+    [this x] (when (db/get-document url (api/label x)) x))
+  (predicate?
+    [this x])
+  (object?
+    [this x])
   (select
     [this s p o]
     (let [s (api/index-value s)
@@ -168,5 +207,10 @@
          (db/put-document
           url {:_id ddocid
                :language "javascript"
-               :views (apply merge (map make-view [:spo :sop :ops :pos]))}))
+               :views (->> (map make-view [:spo :sop :ops :pos])
+                           (concat
+                            [{:subjects {:map view-subjects :reduce "_sum"}
+                              :preds    {:map view-preds :reduce "_sum"}
+                              :objects  {:map view-objects :reduce "_sum"}}])
+                           (apply merge))}))
        db)))
