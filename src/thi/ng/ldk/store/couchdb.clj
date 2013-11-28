@@ -4,14 +4,18 @@
    [thi.ng.common.data.core :refer [vec-conj]]
    [com.ashafa.clutch :as db])
   (:import
-   [com.google.common.hash Hashing]))
+   [com.google.common.hash Hashing]
+   [java.nio.charset Charset]))
 
 (def ^:const VERSION "0.1.0-SNAPSHOT")
 (def ^:const DDOC-ID (str "delta-" VERSION))
 
 (def ^:dynamic *hashimpl*
-  (let [murmur (Hashing/murmur3_128)]
-    #(->> % api/index-value (.hashString murmur) (.asLong) (.toString))))
+  (let [murmur (Hashing/murmur3_128)
+        utf8 (Charset/forName "UTF-8")]
+    #(-> (.hashString murmur (api/index-value %) utf8)
+         (.asLong)
+         (.toString))))
 
 (def ^:private spo-template
   "function(doc) {
