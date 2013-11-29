@@ -10,12 +10,14 @@
 (def ^:const VERSION "0.1.0-SNAPSHOT")
 (def ^:const DDOC-ID (str "delta-" VERSION))
 
-(def ^:dynamic *hashimpl*
-  (let [murmur (Hashing/murmur3_128)
-        utf8 (Charset/forName "UTF-8")]
-    #(-> (.hashString murmur (api/index-value %) utf8)
-         (.asLong)
-         (.toString))))
+(defn murmur-hash
+  ([] (murmur-hash "UTF-8"))
+  ([charset]
+     (let [murmur (Hashing/murmur3_128)
+           cs (Charset/forName charset)]
+       #(-> (.hashString murmur (api/index-value %) cs)
+            (.asLong)
+            (.toString)))))
 
 (def ^:private spo-template
   "function(doc) {
@@ -173,9 +175,14 @@
      url "objects"
      (fn [{o :key}] (if (map? o) (map->node o) (api/make-resource o)))))
   (subject?
-    [this x] (when (db/get-document url (api/label x)) x))
+    [this x]
+    (when (db/get-document url (api/label x)) x))
   (predicate?
-    [this x])
+    [this x]
+    (let [p (api/label x)]
+      (-> url
+          (db/get-view DDOC-ID "preds" {:startkey p :endkey (str p " ") :group true})
+          (first))))
   (object?
     [this x])
   (select
@@ -202,7 +209,7 @@
                      (api/make-resource value))]))))))
 
 (defn make-store
-  ([url] (make-store url *hashimpl*))
+  ([url] (make-store url (murmur-hash)))
   ([url hashfn]
      (let [db (CouchDBStore. url hashfn)
            ddocid (str "_design/" DDOC-ID)
