@@ -15,9 +15,9 @@
   ([charset]
      (let [murmur (Hashing/murmur3_128)
            cs (Charset/forName charset)]
-       #(-> (.hashString murmur (api/index-value %) cs)
-            (.asLong)
-            (.toString)))))
+       #(.. murmur
+            (hashString (api/index-value %) cs)
+            (toString)))))
 
 (def ^:private spo-template
   "function(doc) {
@@ -182,9 +182,15 @@
     (let [p (api/label x)]
       (-> url
           (db/get-view DDOC-ID "preds" {:startkey p :endkey (str p " ") :group true})
-          (first))))
+          (first)
+          (when x))))
   (object?
-    [this x])
+    [this x]
+    (let [o (object-value hashfn x)]
+      (-> url
+          (db/get-view DDOC-ID "ops" {:startkey [o] :endkey [(str o " ")]})
+          (first)
+          (when x))))
   (select
     [this s p o]
     (let [s (api/index-value s)
