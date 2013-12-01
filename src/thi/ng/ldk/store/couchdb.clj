@@ -99,7 +99,6 @@
       (let [oi (object-value hashfn o)
             po (reduce
                 (fn [po o]
-                  ;;(prn :oi oi :ov (object-value hashfn o) :o o)
                   (if-not (= oi (object-value hashfn o))
                     (conj po o)
                     po))
@@ -181,9 +180,9 @@
               (db/delete-document url doc))))))
     this)
   (subjects
-    [this] (entity-view url "subjects" :key))
+    [this] (entity-view url "subjects" #(api/make-resource (:key %))))
   (predicates
-    [this] (entity-view url "preds" :key))
+    [this] (entity-view url "preds" #(api/make-resource (:key %))))
   (objects
     [this]
     (entity-view
@@ -214,6 +213,8 @@
     (when-let [doc (db/get-document url (api/label s))]
       (db/delete-document url doc))
     this)
+  (select [this]
+    (api/select this nil nil nil))
   (select
     [this s p o]
     (let [s (api/index-value s)
@@ -235,7 +236,30 @@
                    (api/make-resource (key pi))
                    (if (map? value)
                      (map->node value)
-                     (api/make-resource value))]))))))
+                     (api/make-resource value))])))))
+  (union [this others]
+    (reduce
+     (fn [this m]
+       (reduce
+        #(api/add-many % %2)
+        this (api/select m nil nil nil))) ;; TODO prefix map handling
+     this (if (satisfies? api/PModel others) [others] others)))
+  (intersection [this others]
+    (let [subjects (set (api/subjects this))
+          keep (reduce
+                #(reduce
+                  (fn [keep s]
+                    (if (subjects s) (conj keep s) keep))
+                  % (map api/subjects %2))
+                #{} (if (satisfies? api/PModel others) [others] others))]
+      (doseq [s subjects]
+        (when-not (keep s) (api/remove-subject this (api/label s))))
+      (doseq [sk keep, m others
+              [s p o :as st] (api/select m sk nil nil)]
+        (when-not (seq (api/select this s p o))
+          (api/remove-statement this st)))
+      ;; TODO prefix map handling
+      this)))
 
 (defn make-store
   ([url] (make-store url (murmur-hash)))
