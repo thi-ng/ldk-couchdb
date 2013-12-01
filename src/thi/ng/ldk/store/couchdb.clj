@@ -165,6 +165,21 @@
             (db/put-document url doc)
             (db/delete-document url doc)))))
     this)
+  (update-statement
+    [this [s p o] [s* p* o* :as s2]]
+    (let [s (api/label s) s* (api/label s*)]
+      (when-let [doc (db/get-document url (api/label s))]
+        (let [[doc edit?] (unindex-po doc hashfn p o)]
+          (when edit?
+            (if (seq (:po doc))
+              (if (= s s*)
+                (let [[doc edit?] (add-statement* doc hashfn p* o*)]
+                  (when edit? (db/put-document url doc)))
+                (do
+                  (db/put-document url doc)
+                  (api/add-statement this s2)))
+              (db/delete-document url doc))))))
+    this)
   (subjects
     [this] (entity-view url "subjects" :key))
   (predicates
@@ -191,6 +206,14 @@
           (db/get-view DDOC-ID "ops" {:startkey [o] :endkey [(str o " ")]})
           (first)
           (when x))))
+  (indexed?
+    [this x]
+    (some #(% this x) [api/subject? api/predicate? api/object?]))
+  (remove-subject
+    [this s]
+    (when-let [doc (db/get-document url (api/label s))]
+      (db/delete-document doc))
+    this)
   (select
     [this s p o]
     (let [s (api/index-value s)
