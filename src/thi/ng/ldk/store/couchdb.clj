@@ -168,7 +168,7 @@
   (update-statement
     [this [s p o] [s* p* o* :as s2]]
     (let [s (api/label s) s* (api/label s*)]
-      (when-let [doc (db/get-document url (api/label s))]
+      (when-let [doc (db/get-document url s)]
         (let [[doc edit?] (unindex-po doc hashfn p o)]
           (when edit?
             (if (seq (:po doc))
@@ -212,7 +212,7 @@
   (remove-subject
     [this s]
     (when-let [doc (db/get-document url (api/label s))]
-      (db/delete-document doc))
+      (db/delete-document url doc))
     this)
   (select
     [this s p o]
