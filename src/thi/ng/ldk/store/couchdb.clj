@@ -237,29 +237,28 @@
                    (if (map? value)
                      (map->node value)
                      (api/make-resource value))])))))
+  ;; TODO add isomorphic normalization
   (union [this others]
     (reduce
-     (fn [this m]
-       (reduce
-        #(api/add-many % %2)
-        this (api/select m nil nil nil))) ;; TODO prefix map handling
+     #(api/add-many % (api/select %2)) ;; TODO prefix map handling
      this (if (satisfies? api/PModel others) [others] others)))
   (intersection [this others]
-    (let [subjects (set (api/subjects this))
+    (let [others (if (satisfies? api/PModel others) [others] others)
+          subjects (set (api/subjects this))
           keep (reduce
                 #(reduce
                   (fn [keep s]
                     (if (subjects s) (conj keep s) keep))
-                  % (map api/subjects %2))
-                #{} (if (satisfies? api/PModel others) [others] others))]
+                  % (api/subjects %2))
+                #{} others)]
       (doseq [s subjects]
         (when-not (keep s) (api/remove-subject this (api/label s))))
-      (doseq [sk keep, m others
-              [s p o :as st] (api/select m sk nil nil)]
-        (when-not (seq (api/select this s p o))
+      (doseq [sk keep
+              [s p o :as st] (api/select this sk nil nil)]
+        (when-not (some #(seq (api/select % s p o)) others)
           (api/remove-statement this st)))
-      ;; TODO prefix map handling
-      this)))
+      this))
+  (prefix-map [this] {}))
 
 (defn make-store
   ([url] (make-store url (murmur-hash)))
