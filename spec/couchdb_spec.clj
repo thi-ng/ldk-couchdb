@@ -4,12 +4,14 @@
    [thi.ng.ldk.store.couchdb :refer :all]
    [com.ashafa.clutch :as db]
    [speclj.core :refer :all]
-   [environ.core :refer [env]]))
+   [environ.core :refer [env]])
+  (:import
+   [thi.ng.ldk.store.couchdb CouchDBStore]))
 
 (def url (str (env :couch-url) "/spec-" (System/currentTimeMillis)))
 
 (describe
- "tests overall CouchDB storage adapter..."
+ "overall CouchDB storage adapter features..."
 
  (with st1 (map api/make-resource ["s1" "p1" "o1"]))
  (with st2 (map api/make-resource ["s2" "p2" "o2"]))
@@ -19,7 +21,7 @@
                (should-not-throw (make-store url))
                (should-not-be-nil (db/database-info url)))
            (it "creating a store succeeds if db is already defined"
-               (make-store url)))
+               (should-be-a CouchDBStore (make-store url))))
 
  (describe "add-statement"
            (with ds (make-store url))
