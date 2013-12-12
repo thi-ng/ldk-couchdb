@@ -51,23 +51,26 @@
       emit(obj[o], 1);
     }
   }
-}"
-   :reduce "_sum"})
+}" :reduce "_sum"})
 
 (def ^:private view-vars {\s "doc._id" \p "p" \o "val"})
 
 (defn- make-view
+  "Takes a view ID and returns map of couchdb view template with
+  correctly injected vars"
   [id]
   (let [[a b c] (name id)]
     {id {:map (format spo-template (view-vars a) (view-vars b) (view-vars c))}}))
 
 (defn- subject-id
+  "Produces a couchdb document ID from given NodeURI or NodeBlank"
   [s]
-  (if (and (satisfies? api/PNode s) (api/blank? s))
+  (if (api/blank? s)
     (str BN-PREFIX (api/label s))
     (api/index-value s)))
 
 (defn- subject->node
+  "Converts a couchdb subject into a NodeURI or NodeBlank"
   [^String s]
   (if (.startsWith s BN-PREFIX)
     (api/make-blank-node (subs s BN-LEN))
@@ -83,7 +86,7 @@
     (api/make-resource l)))
 
 (defn- literal->map
-  "Converts a NodeLiteral into a couchdb map (incl. hashed value)"
+  "Converts a NodeLiteral into a couchdb map (incl. its hashed value)"
   [hashfn l]
   {:v (api/label l)
    :h (hashfn l)
@@ -104,12 +107,17 @@
     (if (map? o) (or (:h o) (:id o)) o)))
 
 (defn- indexed-po?
+  "Takes a couchdb doc, hash fn, pred & object nodes. Returns true if
+  the given PO relation is present in the given document."
   [doc hashfn p o]
   (when-let [obj (get-in doc [:po p])]
     (let [oi (object-value hashfn o)]
       (some #(= oi %) (map #(object-value hashfn %) obj)))))
 
 (defn- unindex-po
+  "Attempts to remove the given PO relation from a document, but
+  doesn't update doc serverside. Instead fn returns 2-elem vector of
+  [updated-doc and edit?]."
   [doc hashfn p o]
   (let [p (keyword (api/label p))]
     (if-let [obj (get-in doc [:po p])]
@@ -126,6 +134,8 @@
       [doc false])))
 
 (defn- add-statement*
+  "Adds the given PO relation to a couchdb doc, but doesn't update
+  serverside. Returns updated document."
   [doc hashfn p o]
   (let [p (keyword (api/label p))]
     (if-not (indexed-po? doc hashfn p o)
@@ -138,13 +148,15 @@
       [doc false])))
 
 (defn- entity-view
+  "Returns seq of (reduced) view results mapped with fn."
   [url view fn]
   (->> (db/get-view url DDOC-ID view {:group true})
        (map fn)))
 
-(defn- model-coll
+(defn- as-coll
+  "Ensures given arg is a collection."
   [xs]
-  (if (satisfies? api/PModel xs) [xs] xs))
+  (if (sequential? xs) xs [xs]))
 
 (defrecord CouchDBStore
     [url hashfn]
@@ -252,21 +264,21 @@
                             s ["spo" [s] [(str s " ")] 0 1]
                             p ["pos" [p] [(str p " ")] 2 0]
                             o ["ops" [o] [(str o " ")] 2 1]
-                            :default ["spo" nil nil 0 1])
-          res (db/get-view url DDOC-ID view (when (and s e) {:startkey s :endkey e}))]
-      (map
-       (fn [{:keys [key value]}]
-         [(subject->node (key si))
-          (api/make-resource (key pi))
-          (object->node value)])
-       res)))
+                            :default ["spo" nil nil 0 1])]
+      (->> (when (and s e) {:startkey s :endkey e})
+           (db/get-view url DDOC-ID view)
+           (map
+            (fn [{k :key v :value}]
+              [(subject->node (k si))
+               (api/make-resource (k pi))
+               (object->node v)])))))
   ;; TODO add isomorphic normalization
   (union [this xs]
     (reduce
      #(api/add-many % (api/select %2)) ;; TODO prefix map handling
-     this (model-coll xs)))
+     this (as-coll xs)))
   (intersection [this xs]
-    (let [xs (model-coll xs)
+    (let [xs (as-coll xs)
           subjects (set (api/subjects this))
           keep (reduce
                 #(reduce
