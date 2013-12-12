@@ -263,6 +263,7 @@
 (defn make-store
   ([url] (make-store url (murmur-hash)))
   ([url hashfn]
+     (db/get-database url)
      (let [db (CouchDBStore. url hashfn)
            ddocid (str "_design/" DDOC-ID)
            ddoc (db/get-document url ddocid)]
@@ -277,3 +278,7 @@
                               :objects  {:map view-objects :reduce "_sum"}}])
                            (apply merge))}))
        db)))
+
+(defn delete-store
+  [url]
+  (db/delete-database url))
