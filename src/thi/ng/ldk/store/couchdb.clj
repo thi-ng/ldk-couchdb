@@ -9,6 +9,8 @@
 
 (def ^:const VERSION "0.1.0-SNAPSHOT")
 (def ^:const DDOC-ID (str "delta-" VERSION))
+(def ^:const BN-PREFIX "bn_:")
+(def ^:const BN-LEN 4)
 
 (defn murmur-hash
   ([] (murmur-hash "UTF-8"))
@@ -36,20 +38,21 @@
 }")
 
 (def ^:private view-subjects
-  "function(doc) { emit(doc._id, 1); }")
+  {:map "function(doc) { emit(doc._id, 1); }" :reduce "_sum"})
 
 (def ^:private view-preds
-  "function(doc) { for (var p in doc.po) emit(p, 1); }")
+  {:map "function(doc) { for (var p in doc.po) emit(p, 1); }" :reduce "_sum"})
 
 (def ^:private view-objects
-  "function(doc) {
+  {:map "function(doc) {
   for(var p in doc.po) {
     var obj = doc.po[p];
     for(var o in obj) {
       emit(obj[o], 1);
     }
   }
-}")
+}"
+   :reduce "_sum"})
 
 (def ^:private view-vars {\s "doc._id" \p "p" \o "val"})
 
@@ -58,12 +61,26 @@
   (let [[a b c] (name id)]
     {id {:map (format spo-template (view-vars a) (view-vars b) (view-vars c))}}))
 
-(defn- map->node
+(defn- subject-id
+  [s]
+  (if (and (satisfies? api/PNode s) (api/blank? s))
+    (str BN-PREFIX (api/label s))
+    (api/index-value s)))
+
+(defn- subject->node
+  [^String s]
+  (if (.startsWith s BN-PREFIX)
+    (api/make-blank-node (subs s BN-LEN))
+    (api/make-resource s)))
+
+(defn- object->node
   "Converts a couchdb map into a NodeLiteral or NodeBlank"
-  [m]
-  (if (:h m)
-    (api/make-literal (:v m) (:l m) (:t m))
-    (api/make-blank-node (:id m))))
+  [l]
+  (if (map? l)
+    (if (:h l)
+      (api/make-literal (:v l) (:l l) (:t l))
+      (api/make-blank-node (:id l)))
+    (api/make-resource l)))
 
 (defn- literal->map
   "Converts a NodeLiteral into a couchdb map (incl. hashed value)"
@@ -125,19 +142,25 @@
   (->> (db/get-view url DDOC-ID view {:group true})
        (map fn)))
 
+(defn- model-coll
+  [xs]
+  (if (satisfies? api/PModel xs) [xs] xs))
+
 (defrecord CouchDBStore
     [url hashfn]
   api/PModel
   (add-statement
     [this [s p o]]
-    (let [s (api/label s)
-          doc (or (db/get-document url s) {:_id s :po {}})
+    ;; TODO (api/ensure-triple s p o)
+    (let [id (subject-id s)
+          doc (or (db/get-document url id) {:_id id :po {}})
           [doc edit?] (add-statement* doc hashfn p o)]
       (when edit? (db/put-document url doc))
       this))
   (add-many [this statements]
+    ;; TODO (doseq [[s p o] statements] (api/ensure-triple t))
     (doseq [chunk (partition-all 1000 statements)]
-      (let [subjects (map (comp api/label first) chunk)
+      (let [subjects (map (comp subject-id first) chunk)
             docs (reduce
                   (fn [idx s]
                     (if-not (idx s)
@@ -157,7 +180,8 @@
     this)
   (remove-statement
     [this [s p o]]
-    (when-let [doc (db/get-document url (api/label s))]
+    ;; TODO (api/ensure-triple s p o)
+    (when-let [doc (db/get-document url (subject-id s))]
       (let [[doc edit?] (unindex-po doc hashfn p o)]
         (when edit?
           (if (seq (:po doc))
@@ -166,7 +190,9 @@
     this)
   (update-statement
     [this [s p o] [s* p* o* :as s2]]
-    (let [s (api/label s) s* (api/label s*)]
+    ;; TODO (api/ensure-triple s p o)
+    ;; TODO (api/ensure-triple s* p* o*)
+    (let [s (subject-id s) s* (subject-id s*)]
       (when-let [doc (db/get-document url s)]
         (let [[doc edit?] (unindex-po doc hashfn p o)]
           (when edit?
@@ -180,24 +206,22 @@
               (db/delete-document url doc))))))
     this)
   (subjects
-    [this] (entity-view url "subjects" #(api/make-resource (:key %))))
+    [this] (entity-view url "subjects" #(subject->node (:key %))))
   (predicates
     [this] (entity-view url "preds" #(api/make-resource (:key %))))
   (objects
-    [this]
-    (entity-view
-     url "objects"
-     (fn [{o :key}] (if (map? o) (map->node o) (api/make-resource o)))))
+    [this] (entity-view url "objects" #(object->node (:key %))))
   (subject?
     [this x]
-    (when (db/get-document url (api/label x)) x))
+    (when (and (satisfies? api/PNode x) (db/get-document url (subject-id x))) x))
   (predicate?
     [this x]
-    (let [p (api/label x)]
-      (-> url
-          (db/get-view DDOC-ID "preds" {:startkey p :endkey (str p " ") :group true})
-          (first)
-          (when x))))
+    (when (api/uri? x)
+      (let [p (api/label x)]
+        (-> url
+            (db/get-view DDOC-ID "preds" {:startkey p :endkey (str p " ") :group true})
+            (first)
+            (when x)))))
   (object?
     [this x]
     (let [o (object-value hashfn x)]
@@ -210,14 +234,14 @@
     (some #(% this x) [api/subject? api/predicate? api/object?]))
   (remove-subject
     [this s]
-    (when-let [doc (db/get-document url (api/label s))]
+    (when-let [doc (db/get-document url (subject-id s))]
       (db/delete-document url doc))
     this)
   (select [this]
     (api/select this nil nil nil))
   (select
     [this s p o]
-    (let [s (api/index-value s)
+    (let [s (subject-id s)
           p (api/index-value p)
           o (object-value hashfn o)
           [view s e si pi] (cond
@@ -230,32 +254,31 @@
                             o ["ops" [o] [(str o " ")] 2 1]
                             :default ["spo" nil nil 0 1])
           res (db/get-view url DDOC-ID view (when (and s e) {:startkey s :endkey e}))]
-      (->> res
-           (map (fn [{:keys [key value]}]
-                  [(api/make-resource (key si))
-                   (api/make-resource (key pi))
-                   (if (map? value)
-                     (map->node value)
-                     (api/make-resource value))])))))
+      (map
+       (fn [{:keys [key value]}]
+         [(subject->node (key si))
+          (api/make-resource (key pi))
+          (object->node value)])
+       res)))
   ;; TODO add isomorphic normalization
-  (union [this others]
+  (union [this xs]
     (reduce
      #(api/add-many % (api/select %2)) ;; TODO prefix map handling
-     this (if (satisfies? api/PModel others) [others] others)))
-  (intersection [this others]
-    (let [others (if (satisfies? api/PModel others) [others] others)
+     this (model-coll xs)))
+  (intersection [this xs]
+    (let [xs (model-coll xs)
           subjects (set (api/subjects this))
           keep (reduce
                 #(reduce
                   (fn [keep s]
                     (if (subjects s) (conj keep s) keep))
                   % (api/subjects %2))
-                #{} others)]
+                #{} xs)]
       (doseq [s subjects]
         (when-not (keep s) (api/remove-subject this (api/label s))))
       (doseq [sk keep
               [s p o :as st] (api/select this sk nil nil)]
-        (when-not (some #(seq (api/select % s p o)) others)
+        (when-not (some #(seq (api/select % s p o)) xs)
           (api/remove-statement this st)))
       this))
   (prefix-map [this] {}))
@@ -273,9 +296,9 @@
                :language "javascript"
                :views (->> (map make-view [:spo :sop :ops :pos])
                            (concat
-                            [{:subjects {:map view-subjects :reduce "_sum"}
-                              :preds    {:map view-preds :reduce "_sum"}
-                              :objects  {:map view-objects :reduce "_sum"}}])
+                            [{:subjects view-subjects
+                              :preds    view-preds
+                              :objects  view-objects}])
                            (apply merge))}))
        db)))
 
