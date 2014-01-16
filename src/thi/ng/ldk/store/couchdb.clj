@@ -73,17 +73,17 @@
   "Converts a couchdb subject into a NodeURI or NodeBlank"
   [^String s]
   (if (.startsWith s BN-PREFIX)
-    (api/make-blank-node (subs s BN-LEN))
-    (api/make-resource s)))
+    (api/blank-node (subs s BN-LEN))
+    (api/resource s)))
 
 (defn- object->node
   "Converts a couchdb map into a NodeLiteral or NodeBlank"
   [l]
   (if (map? l)
     (if (:h l)
-      (api/make-literal (:v l) (:l l) (:t l))
-      (api/make-blank-node (:id l)))
-    (api/make-resource l)))
+      (api/literal (:v l) (:l l) (:t l))
+      (api/blank-node (:id l)))
+    (api/resource l)))
 
 (defn- literal->map
   "Converts a NodeLiteral into a couchdb map (incl. its hashed value)"
@@ -159,7 +159,7 @@
   (if (sequential? xs) xs [xs]))
 
 (defrecord CouchDBStore
-    [url hashfn]
+    [ns url hashfn]
   api/PModel
   (add-statement
     [this [s p o]]
@@ -220,7 +220,7 @@
   (subjects
     [this] (entity-view url "subjects" #(subject->node (:key %))))
   (predicates
-    [this] (entity-view url "preds" #(api/make-resource (:key %))))
+    [this] (entity-view url "preds" #(api/resource (:key %))))
   (objects
     [this] (entity-view url "objects" #(object->node (:key %))))
   (subject?
@@ -270,7 +270,7 @@
            (map
             (fn [{k :key v :value}]
               [(subject->node (k si))
-               (api/make-resource (k pi))
+               (api/resource (k pi))
                (object->node v)])))))
   ;; TODO add isomorphic normalization
   (union [this xs]
@@ -293,13 +293,18 @@
         (when-not (some #(seq (api/select % s p o)) xs)
           (api/remove-statement this st)))
       this))
-  (prefix-map [this] {}))
+  (add-prefix [this prefix uri]
+    (assoc-in this [:ns prefix] uri))
+  (add-prefix [this prefix-map]
+    (update-in this [:ns] merge prefix-map))
+  (prefix-map [this] ns))
 
 (defn make-store
-  ([url] (make-store url (murmur-hash)))
-  ([url hashfn]
+  ([url] (make-store url nil (murmur-hash)))
+  ([url prefixes] (make-store url prefixes (murmur-hash)))
+  ([url prefixes hashfn]
      (db/get-database url)
-     (let [db (CouchDBStore. url hashfn)
+     (let [db (CouchDBStore. (merge api/default-prefixes prefixes) url hashfn)
            ddocid (str "_design/" DDOC-ID)
            ddoc (db/get-document url ddocid)]
        (when-not ddoc
