@@ -1,7 +1,7 @@
 (ns thi.ng.ldk.store.couchdb
   (:require
    [thi.ng.ldk.core.api :as api]
-   [thi.ng.common.data.core :refer [vec-conj]]
+   [thi.ng.common.data.core :as d]
    [com.ashafa.clutch :as db])
   (:import
    [com.google.common.hash Hashing]
@@ -140,7 +140,7 @@
   (let [p (keyword (api/label p))]
     (if-not (indexed-po? doc hashfn p o)
       [(update-in
-        doc [:po p] vec-conj
+        doc [:po p] d/vec-conj
         (cond
          (api/literal? o) (literal->map hashfn o)
          (api/blank? o) (blank->map o)
@@ -158,11 +158,9 @@
   [xs]
   (if (sequential? xs) xs [xs]))
 
-(defrecord CouchDBStore
-    [ns url hashfn]
+(defrecord CouchDBStore [ns base url hashfn]
   api/PModel
-  (add-statement
-    [this [s p o]]
+  (add-statement [this [s p o]]
     ;; TODO (api/ensure-triple s p o)
     (let [id (subject-id s)
           doc (or (db/get-document url id) {:_id id :po {}})
@@ -200,8 +198,7 @@
             (db/put-document url doc)
             (db/delete-document url doc)))))
     this)
-  (update-statement
-    [this [s p o] [s* p* o* :as s2]]
+  (update-statement [this [s p o] [s* p* o* :as s2]]
     ;; TODO (api/ensure-triple s p o)
     ;; TODO (api/ensure-triple s* p* o*)
     (let [s (subject-id s) s* (subject-id s*)]
@@ -217,42 +214,36 @@
                   (api/add-statement this s2)))
               (db/delete-document url doc))))))
     this)
-  (subjects
-    [this] (entity-view url "subjects" #(subject->node (:key %))))
-  (predicates
-    [this] (entity-view url "preds" #(api/resource (:key %))))
-  (objects
-    [this] (entity-view url "objects" #(object->node (:key %))))
-  (subject?
-    [this x]
+  (subjects [this]
+    (entity-view url "subjects" #(subject->node (:key %))))
+  (predicates [this]
+    (entity-view url "preds" #(api/resource (:key %))))
+  (objects [this]
+    (entity-view url "objects" #(object->node (:key %))))
+  (subject? [this x]
     (when (and (satisfies? api/PNode x) (db/get-document url (subject-id x))) x))
-  (predicate?
-    [this x]
+  (predicate? [this x]
     (when (api/uri? x)
       (let [p (api/label x)]
         (-> url
             (db/get-view DDOC-ID "preds" {:startkey p :endkey (str p " ") :group true})
             (first)
             (when x)))))
-  (object?
-    [this x]
+  (object? [this x]
     (let [o (object-value hashfn x)]
       (-> url
           (db/get-view DDOC-ID "ops" {:startkey [o] :endkey [(str o " ")]})
           (first)
           (when x))))
-  (indexed?
-    [this x]
+  (indexed? [this x]
     (some #(% this x) [api/subject? api/predicate? api/object?]))
-  (remove-subject
-    [this s]
+  (remove-subject [this s]
     (when-let [doc (db/get-document url (subject-id s))]
       (db/delete-document url doc))
     this)
   (select [this]
     (api/select this nil nil nil))
-  (select
-    [this s p o]
+  (select [this s p o]
     (let [s (subject-id s)
           p (api/index-value p)
           o (object-value hashfn o)
@@ -296,20 +287,34 @@
   (add-prefix [this prefix uri]
     (assoc-in this [:ns prefix] uri))
   (add-prefix [this prefix-map]
-    (update-in this [:ns] merge prefix-map))
-  (prefix-map [this] ns))
+    (let [this (update-in this [:ns] merge prefix-map)]
+      (db/put-document url (str "meta-" DDOC-ID) (merge (:ns this) {:__base base}))
+      this))
+  (prefix-map [this]
+    ns)
+  (base-uri [this]
+    base)
+  (set-base-uri [this uri]
+    (let [this (assoc this :base uri)]
+      (db/put-document url (str "meta-" DDOC-ID) (merge (:ns this) {:__base uri}))
+      this)))
 
 (defn make-store
-  ([url] (make-store url nil (murmur-hash)))
-  ([url prefixes] (make-store url prefixes (murmur-hash)))
-  ([url prefixes hashfn]
+  ([url] (make-store url {} nil (murmur-hash)))
+  ([url prefixes] (make-store url prefixes nil (murmur-hash)))
+  ([url prefixes base] (make-store url prefixes base (murmur-hash)))
+  ([url prefixes base hashfn]
      (db/get-database url)
-     (let [db (CouchDBStore. (merge api/default-prefixes prefixes) url hashfn)
-           ddocid (str "_design/" DDOC-ID)
-           ddoc (db/get-document url ddocid)]
+     (let [meta-id (str "meta-" DDOC-ID)
+           meta (or (db/get-document url meta-id) {:_id meta-id})
+           prefixes (d/stringify-keys (merge api/default-prefixes (:prefixes meta) prefixes))
+           meta (merge meta {:prefixes prefixes :base (or base (:base meta))})
+           db (CouchDBStore. (merge api/default-prefixes (:prefixes meta)) (:base meta) url hashfn)
+           ddoc-id (str "_design/" DDOC-ID)
+           ddoc (db/get-document url ddoc-id)]
        (when-not ddoc
          (db/put-document
-          url {:_id ddocid
+          url {:_id ddoc-id
                :language "javascript"
                :views (->> (map make-view [:spo :sop :ops :pos])
                            (concat
@@ -317,6 +322,7 @@
                               :preds    view-preds
                               :objects  view-objects}])
                            (apply merge))}))
+       (db/put-document url meta)
        db)))
 
 (defn delete-store
